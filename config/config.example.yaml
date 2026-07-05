@@ -1,0 +1,18 @@
+# PRReviewAgent 配置示例
+# 复制为 config/config.yaml 并按需修改。
+# 缺省值见 config/default.yaml，本文件可覆盖任意子集。
+
+review:
+  enable_auto_patch: false
+  max_changed_files: 100
+
+sandbox:
+  enabled: true
+  default_timeout_seconds: 1800
+
+patch:
+  max_retry: 2
+  min_confidence_for_patch: 0.8
+
+memory:
+  enable_repo_memory: false

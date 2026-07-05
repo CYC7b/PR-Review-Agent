@@ -1,0 +1,36 @@
+# PR Review Agent 开发环境编排
+# 用法: docker-compose up -d redis postgres
+# 沙箱镜像需单独构建: ./docker/sandbox/build.sh
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: prreview
+      POSTGRES_PASSWORD: prreview
+      POSTGRES_DB: pr_review
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U prreview"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  redis-data:
+  pg-data:

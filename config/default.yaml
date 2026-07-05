@@ -1,0 +1,55 @@
+review:
+  trigger_events:
+    - pull_request.opened
+    - pull_request.synchronize
+    - pull_request.reopened
+  max_changed_files: 100
+  max_diff_lines: 5000
+  skip_docs_only: true
+  enable_auto_patch: false
+  publish_low_confidence_findings: false
+
+agents:
+  max_parallel_agents: 4
+  planner_timeout_seconds: 120
+  agent_timeout_seconds: 600
+
+sandbox:
+  enabled: true
+  default_timeout_seconds: 1800
+  cpu_limit: 2
+  memory_limit: "4Gi"
+  disk_limit: "10Gi"
+  pid_limit: 200
+  network_default: "disabled"
+  max_lifetime_seconds: 1800
+  # 依赖解析阶段的受限出网代理（如 tinyproxy/squid，仅放行下方 allowlist）。
+  # 为空时依赖阶段完全无网络（fail-closed），不会放开无限制公网出网。
+  egress_proxy_url: ""
+  # Docker 不可用时是否回退到本地宿主机执行（无隔离，仅限开发）。生产必须为 false。
+  allow_insecure_local_fallback: false
+  dependency_network_allowlist:
+    - "pypi.org"
+    - "files.pythonhosted.org"
+    - "registry.npmjs.org"
+    - "proxy.golang.org"
+
+patch:
+  max_retry: 2
+  min_confidence_for_patch: 0.8
+  allow_new_dependencies: false
+  allow_public_api_changes: false
+  publish_only_if_validated: true
+
+memory:
+  enable_repo_memory: false
+  enable_org_memory: false
+  store_full_code: false
+  retention_days: 90
+
+github:
+  use_pending_review: true
+  deduplicate_comments: true
+  bind_to_head_sha: true
+  require_webhook_signature: true
+  api_max_retries: 3

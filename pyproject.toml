@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pr-review-agent"
+version = "0.1.0"
+description = "PR Review Agent with Sandbox Execution — 证据化、可验证的自动化 PR 审查系统"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "PRReviewAgent" }]
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+    "pydantic>=2.6.0",
+    "pydantic-settings>=2.2.0",
+    "PyYAML>=6.0",
+    "httpx>=0.27.0",
+    "SQLAlchemy>=2.0.25",
+    "alembic>=1.13.0",
+    "redis>=5.0.0",
+    "docker>=7.0.0",
+    "openai>=1.12.0",
+    "tiktoken>=0.6.0",
+    "structlog>=24.1.0",
+    "tenacity>=8.2.0",
+    "python-multipart>=0.0.9",
+    "click>=8.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.3.0",
+    "mypy>=1.8.0",
+    "respx>=0.20.0",
+]
+postgres = [
+    "psycopg2-binary>=2.9.9",
+]
+
+[project.scripts]
+pr-review-agent = "app.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
