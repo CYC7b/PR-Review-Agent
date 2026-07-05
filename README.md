@@ -45,6 +45,24 @@ RECEIVED → VALIDATING_EVENT → PREPROCESSING → PLANNING
 
 **幂等规则**：每个任务由 `repository_id + pr_number + head_sha` 唯一标识。重复 webhook 返回已有任务；新 commit 到达时旧任务进入 `SUPERSEDED` 并销毁沙箱。
 
+### 审查流水线阶段
+
+1. **预处理** — 校验 webhook 签名，拉取 PR 元数据、changed files、unified diff 与文件内容
+2. **规划** — 识别语言/风险区域，判断变更类型（文档/测试/代码/配置/依赖），生成任务图与沙箱需求；纯文档变更直接 `SKIPPED`
+3. **静态审查** — Security Reviewer（启发式规则 + 沙箱内 SAST + LLM）与 Bug Hunter 并行分析
+4. **动态验证** — 在隔离沙箱中运行测试/lint/type check，区分环境/依赖/代码失败
+5. **聚合** — 去重、按严重度与置信度排序、抑制低置信度无佐证发现、判定 patch 资格
+6. **补丁生成与验证** — 仅对高置信度小范围问题生成最小修复，沙箱验证通过（`passed`）才作为 GitHub suggestion 发布
+7. **发布** — 行级 review comment / suggestion / summary，绑定 head SHA、去重、安全高危精简披露
+
+### 设计原则
+
+- **工具约束优先** — Agent 不直接触碰 GitHub/文件系统/网络/执行环境，一切经 Tool Gateway（统一审计/限流/校验）
+- **证据优先于推测** — 每条发现附代码位置、类型、严重度、置信度、证据与是否已验证；低置信度无佐证不伪装为确定缺陷
+- **最小权限与凭据隔离** — PR 代码视为不可信输入，Token/云凭据/内网绝不进入沙箱
+- **保守自动修复** — 仅高置信度、小范围、可验证、不改外部行为的问题才生成可提交 patch
+- **幂等与可取消** — 同键幂等、新 commit 取代旧任务、超时退出、沙箱失败安全回收
+
 ## 快速开始
 
 ### 环境要求
@@ -71,7 +89,7 @@ cp config/config.example.yaml config/config.yaml
 # 按需覆盖默认配置
 ```
 
-关键配置项见 `config/default.yaml`（对应 SPEC 第 13 节）。
+关键配置项见 `config/default.yaml`。
 
 ### 构建沙箱镜像（可选，用于动态测试）
 
@@ -100,7 +118,7 @@ pr-review-agent status --review-id repo-123-pr-42-sha-abc123def456
 
 ## GitHub App 配置
 
-推荐最小权限（SPEC 12.1）：
+推荐最小权限：
 
 | 权限 | 级别 | 用途 |
 |------|------|------|
@@ -114,7 +132,7 @@ pr-review-agent status --review-id repo-123-pr-42-sha-abc123def456
 
 ## 沙箱安全
 
-沙箱遵循最小权限与强隔离设计（SPEC 第 9 节）：
+沙箱遵循最小权限与强隔离设计：
 
 - **两阶段网络模型**：依赖安装阶段受限网络（allowlist registry），测试执行阶段完全无网络
 - **容器安全**：非 root、禁止 privileged、rootfs 只读、no-new-privileges、cgroup 资源限制
@@ -147,7 +165,6 @@ PRReviewAgent/
 ├── config/                  # YAML 配置
 ├── docker/sandbox/          # 沙箱镜像 Dockerfile
 ├── tests/                   # 测试套件
-├── SPEC.md                  # 系统设计规格书
 └── pyproject.toml
 ```
 
@@ -161,7 +178,7 @@ pytest tests/ -v
 
 ## 降级策略
 
-系统支持部分成功（SPEC 15.2）：
+系统支持部分成功：
 
 - 静态审查成功、动态测试失败 → 仍发布静态发现
 - 测试成功、patch 失败 → 发布 issue，不发布 patch
