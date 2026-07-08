@@ -1,4 +1,4 @@
-"""Webhook Receiver 集成测试（SPEC 5.1）。"""
+"""GitHub Webhook 接收端点集成测试（SPEC 5.1）。"""
 
 from __future__ import annotations
 
@@ -37,17 +37,12 @@ def _sign(body: bytes, secret: str) -> str:
     return "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
 
-class TestWebhookReceiver:
-    def test_health(self, client):
-        resp = client.get("/webhook/health")
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "ok"
-
+class TestGithubWebhook:
     def test_missing_secret_rejected(self, client):
         """未配置 secret 且要求签名 → fail-closed 拒绝（SPEC 5.1 / C5）。"""
         payload = _make_pr_payload()
         resp = client.post(
-            "/webhook/github",
+            "/api/v1/webhooks/github",
             data=json.dumps(payload),
             headers={"x-github-event": "pull_request", "content-type": "application/json"},
         )
@@ -60,7 +55,7 @@ class TestWebhookReceiver:
         reload_config()
         body = json.dumps({"action": "created", "issue": {"number": 1}}).encode()
         resp = client.post(
-            "/webhook/github",
+            "/api/v1/webhooks/github",
             data=body,
             headers={"x-github-event": "issue",
                      "x-hub-signature-256": _sign(body, "my-secret")},
@@ -92,7 +87,7 @@ class TestWebhookReceiver:
 
         body = json.dumps(_make_pr_payload()).encode()
         resp = client.post(
-            "/webhook/github",
+            "/api/v1/webhooks/github",
             data=body,
             headers={"x-github-event": "pull_request", "content-type": "application/json",
                      "x-hub-signature-256": _sign(body, "my-secret")},
@@ -101,6 +96,7 @@ class TestWebhookReceiver:
         data = resp.json()
         assert data["status"] == "accepted"
         assert "review_id" in data
+        assert resp.headers["location"] == f"/api/v1/reviews/{data['review_id']}"
 
     def test_invalid_signature_rejected(self, client, monkeypatch):
         monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "my-secret")
@@ -110,7 +106,7 @@ class TestWebhookReceiver:
 
         payload = _make_pr_payload()
         resp = client.post(
-            "/webhook/github",
+            "/api/v1/webhooks/github",
             data=json.dumps(payload),
             headers={
                 "x-github-event": "pull_request",
@@ -128,19 +124,10 @@ class TestWebhookReceiver:
 
         body = json.dumps(_make_pr_payload(action="closed")).encode()
         resp = client.post(
-            "/webhook/github",
+            "/api/v1/webhooks/github",
             data=body,
             headers={"x-github-event": "pull_request", "content-type": "application/json",
                      "x-hub-signature-256": _sign(body, "my-secret")},
         )
         assert resp.status_code == 200
         assert resp.json()["status"] == "ignored"
-
-    def test_get_review_not_found(self, client):
-        resp = client.get("/webhook/reviews/nonexistent")
-        assert resp.status_code == 404
-
-    def test_list_reviews(self, client):
-        resp = client.get("/webhook/reviews")
-        assert resp.status_code == 200
-        assert "reviews" in resp.json()

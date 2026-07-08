@@ -74,6 +74,12 @@ class MemoryConfig(BaseModel):
     retention_days: int = 90
 
 
+class ApiConfig(BaseModel):
+    # 是否强制要求管理类端点（/api/v1/reviews*）携带 Bearer token。
+    # 为 True 时若未配置 API_KEY 则拒绝请求（fail-closed，与 webhook 签名策略一致）。
+    require_api_key: bool = True
+
+
 class GitHubConfig(BaseModel):
     use_pending_review: bool = True
     deduplicate_comments: bool = True
@@ -92,6 +98,7 @@ class AppConfig(BaseModel):
     patch: PatchConfig = Field(default_factory=PatchConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     github: GitHubConfig = Field(default_factory=GitHubConfig)
+    api: ApiConfig = Field(default_factory=ApiConfig)
 
 
 class EnvSettings(BaseSettings):
@@ -108,6 +115,9 @@ class EnvSettings(BaseSettings):
 
     database_url: str = "sqlite:///./data/pr_review.db"
     redis_url: str = ""
+
+    # API 鉴权（管理类端点，如 /api/v1/reviews*）
+    api_key: str = ""
 
     # GitHub App
     github_app_id: str = ""

@@ -1,0 +1,373 @@
+openapi: 3.0.3
+info:
+  title: PR Review Agent
+  description: 证据化、可验证的自动化 PR 审查系统（Sandbox Execution）
+  version: 0.1.0
+paths:
+  /health:
+    get:
+      tags:
+      - health
+      summary: Health
+      operationId: health_health_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /api/v1/webhooks/github:
+    post:
+      tags:
+      - webhooks
+      summary: Receive Github Webhook
+      description: 接收 GitHub webhook 事件，创建一次 PR 审查任务（异步处理）。
+      operationId: receive_github_webhook_api_v1_webhooks_github_post
+      parameters:
+      - name: x-github-event
+        in: header
+        required: false
+        schema:
+          title: X-Github-Event
+          nullable: true
+          type: string
+      - name: x-github-delivery
+        in: header
+        required: false
+        schema:
+          title: X-Github-Delivery
+          nullable: true
+          type: string
+      - name: x-hub-signature-256
+        in: header
+        required: false
+        schema:
+          title: X-Hub-Signature-256
+          nullable: true
+          type: string
+      responses:
+        '202':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookAcceptedResponse'
+        '200':
+          description: 事件被忽略（非关注事件类型/action）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookIgnoredResponse'
+        '400':
+          description: payload 不是合法 JSON
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: webhook 签名校验失败
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: 未配置签名密钥（fail-closed，拒绝处理）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/reviews:
+    get:
+      tags:
+      - reviews
+      summary: List Reviews
+      description: 分页列出最近的审查任务。
+      operationId: list_reviews_api_v1_reviews_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 100
+          minimum: 1
+          default: 20
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReviewListResponse'
+        '401':
+          description: 缺失或无效的 Bearer token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: 未配置 API_KEY（fail-closed，拒绝处理）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/reviews/{review_id}:
+    get:
+      tags:
+      - reviews
+      summary: Get Review
+      description: 查询单个审查任务详情。
+      operationId: get_review_api_v1_reviews__review_id__get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: review_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Review Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReviewDetail'
+        '401':
+          description: 缺失或无效的 Bearer token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: 未配置 API_KEY（fail-closed，拒绝处理）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: 任务不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+components:
+  schemas:
+    ErrorResponse:
+      properties:
+        detail:
+          type: string
+          title: Detail
+      type: object
+      required:
+      - detail
+      title: ErrorResponse
+    HTTPValidationError:
+      properties:
+        detail:
+          items:
+            $ref: '#/components/schemas/ValidationError'
+          type: array
+          title: Detail
+      type: object
+      title: HTTPValidationError
+    HealthResponse:
+      properties:
+        status:
+          type: string
+          title: Status
+          example: ok
+        service:
+          type: string
+          title: Service
+        version:
+          type: string
+          title: Version
+      type: object
+      required:
+      - status
+      - service
+      - version
+      title: HealthResponse
+    ReviewDetail:
+      properties:
+        review_id:
+          type: string
+          title: Review Id
+        status:
+          $ref: '#/components/schemas/ReviewState'
+        repository:
+          type: string
+          title: Repository
+        pr_number:
+          type: integer
+          title: Pr Number
+        head_sha:
+          type: string
+          title: Head Sha
+        created_at:
+          title: Created At
+          nullable: true
+          type: string
+          format: date-time
+        completed_at:
+          title: Completed At
+          nullable: true
+          type: string
+          format: date-time
+        error:
+          title: Error
+          nullable: true
+          type: string
+      type: object
+      required:
+      - review_id
+      - status
+      - repository
+      - pr_number
+      - head_sha
+      title: ReviewDetail
+    ReviewListResponse:
+      properties:
+        reviews:
+          items:
+            $ref: '#/components/schemas/ReviewSummary'
+          type: array
+          title: Reviews
+        limit:
+          type: integer
+          title: Limit
+        count:
+          type: integer
+          title: Count
+      type: object
+      required:
+      - reviews
+      - limit
+      - count
+      title: ReviewListResponse
+    ReviewState:
+      type: string
+      enum:
+      - RECEIVED
+      - VALIDATING_EVENT
+      - PREPROCESSING
+      - PLANNING
+      - SANDBOX_PREPARE
+      - STATIC_REVIEW
+      - DYNAMIC_TESTING
+      - ISSUE_AGGREGATION
+      - PATCH_GENERATION
+      - PATCH_VALIDATION
+      - REVIEW_PUBLISHING
+      - COMPLETED
+      - FAILED
+      - CANCELLED
+      - SUPERSEDED
+      - TIMEOUT
+      - SKIPPED
+      title: ReviewState
+      description: 审查状态机状态（SPEC 4.1）。
+    ReviewSummary:
+      properties:
+        review_id:
+          type: string
+          title: Review Id
+        status:
+          $ref: '#/components/schemas/ReviewState'
+        repository:
+          type: string
+          title: Repository
+        pr_number:
+          type: integer
+          title: Pr Number
+        head_sha:
+          type: string
+          title: Head Sha
+      type: object
+      required:
+      - review_id
+      - status
+      - repository
+      - pr_number
+      - head_sha
+      title: ReviewSummary
+    ValidationError:
+      properties:
+        loc:
+          items:
+            anyOf:
+            - type: string
+            - type: integer
+          type: array
+          title: Location
+        msg:
+          type: string
+          title: Message
+        type:
+          type: string
+          title: Error Type
+        input:
+          title: Input
+        ctx:
+          type: object
+          title: Context
+      type: object
+      required:
+      - loc
+      - msg
+      - type
+      title: ValidationError
+    WebhookAcceptedResponse:
+      properties:
+        status:
+          type: string
+          title: Status
+          default: accepted
+          example: accepted
+        review_id:
+          type: string
+          title: Review Id
+        task_status:
+          $ref: '#/components/schemas/ReviewState'
+      type: object
+      required:
+      - review_id
+      - task_status
+      title: WebhookAcceptedResponse
+    WebhookIgnoredResponse:
+      properties:
+        status:
+          type: string
+          title: Status
+          default: ignored
+          example: ignored
+      type: object
+      title: WebhookIgnoredResponse
+  securitySchemes:
+    HTTPBearer:
+      type: http
+      scheme: bearer

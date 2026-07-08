@@ -53,3 +53,8 @@ github:
   bind_to_head_sha: true
   require_webhook_signature: true
   api_max_retries: 3
+
+api:
+  # 管理类端点（/api/v1/reviews*）是否强制要求 Bearer token。
+  # 未配置 API_KEY 时会拒绝服务（fail-closed），仅开发环境可显式关闭。
+  require_api_key: true

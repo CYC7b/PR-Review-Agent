@@ -1,4 +1,4 @@
-"""Webhook Receiver —— 接收 GitHub 事件（SPEC 3.2 / 5.1）。
+"""GitHub Webhook 接收（资源：webhooks）。
 
 验证 webhook signature，解析 PR 事件，提交给 Orchestrator。
 MVP 支持同步处理；生产环境应改为异步队列。
@@ -7,12 +7,13 @@ MVP 支持同步处理；生产环境应改为异步队列。
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+import json
 
 from fastapi import APIRouter, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
-from app.config import get_settings
+from app.api.schemas import ErrorResponse, WebhookAcceptedResponse, WebhookIgnoredResponse
+from app.config import get_config, get_settings
 from app.logging_setup import get_logger
 from app.models import WebhookEvent
 from app.orchestrator import get_orchestrator
@@ -20,27 +21,36 @@ from app.tools.github_tool import GitHubClient
 
 logger = get_logger(__name__)
 
-router = APIRouter(prefix="/webhook", tags=["webhook"])
+router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
 # GitHub 事件类型白名单
 _SUPPORTED_EVENTS = {"pull_request"}
 
 
-@router.post("/github")
-async def github_webhook(
+@router.post(
+    "/github",
+    response_model=WebhookAcceptedResponse,
+    status_code=202,
+    responses={
+        200: {"model": WebhookIgnoredResponse, "description": "事件被忽略（非关注事件类型/action）"},
+        400: {"model": ErrorResponse, "description": "payload 不是合法 JSON"},
+        401: {"model": ErrorResponse, "description": "webhook 签名校验失败"},
+        503: {"model": ErrorResponse, "description": "未配置签名密钥（fail-closed，拒绝处理）"},
+    },
+)
+async def receive_github_webhook(
     request: Request,
+    response: Response,
     x_github_event: str | None = Header(None),
     x_github_delivery: str | None = Header(None),
     x_hub_signature_256: str | None = Header(None),
-) -> Response:
-    """接收 GitHub webhook。"""
+) -> WebhookAcceptedResponse | JSONResponse:
+    """接收 GitHub webhook 事件，创建一次 PR 审查任务（异步处理）。"""
     raw_body = await request.body()
     settings = get_settings()
-    from app.config import get_config
-
     require_sig = get_config().github.require_webhook_signature
 
-    # 1. 验证签名（SPEC 5.1 / C5：fail-closed）
+    # 1. 验证签名（fail-closed）
     if settings.github_webhook_secret:
         if not GitHubClient.verify_webhook_signature(
             raw_body, x_hub_signature_256, settings.github_webhook_secret
@@ -59,11 +69,9 @@ async def github_webhook(
 
     # 2. 事件类型检查
     if x_github_event not in _SUPPORTED_EVENTS:
-        return Response(status_code=200, content='{"status":"ignored"}', media_type="application/json")
+        return JSONResponse(status_code=200, content={"status": "ignored"})
 
     # 3. 解析 payload
-    import json
-
     try:
         payload = json.loads(raw_body)
     except json.JSONDecodeError:
@@ -71,15 +79,13 @@ async def github_webhook(
 
     parsed = GitHubClient.parse_webhook_event(payload)
     if parsed is None:
-        return Response(status_code=200, content='{"status":"ignored"}', media_type="application/json")
+        return JSONResponse(status_code=200, content={"status": "ignored"})
 
     action = parsed["action"]
     event_type = parsed["event_type"]
-    from app.config import get_config
-
     if event_type not in get_config().review.trigger_events:
         logger.info("webhook.event_not_in_trigger_list", github_event=event_type)
-        return Response(status_code=200, content='{"status":"ignored"}', media_type="application/json")
+        return JSONResponse(status_code=200, content={"status": "ignored"})
 
     # 4. 构造 WebhookEvent
     event = WebhookEvent(
@@ -105,14 +111,8 @@ async def github_webhook(
     logger.info("webhook.accepted", review_id=task.review_id,
                 github_event=event_type, pr=event.repository_full_name)
 
-    return JSONResponse(
-        status_code=202,
-        content={
-            "status": "accepted",
-            "review_id": task.review_id,
-            "task_status": task.status.value,
-        },
-    )
+    response.headers["Location"] = f"/api/v1/reviews/{task.review_id}"
+    return WebhookAcceptedResponse(review_id=task.review_id, task_status=task.status)
 
 
 async def _process_review(review_id: str) -> None:
@@ -123,51 +123,3 @@ async def _process_review(review_id: str) -> None:
         await loop.run_in_executor(None, orchestrator.process, review_id)
     except Exception as exc:  # noqa: BLE001
         logger.error("webhook.process_failed", review_id=review_id, error=str(exc))
-
-
-@router.get("/health")
-async def health() -> dict[str, Any]:
-    return {"status": "ok", "service": "pr-review-agent"}
-
-
-@router.get("/reviews/{review_id}")
-async def get_review(review_id: str) -> JSONResponse:
-    """查询审查任务状态。"""
-    from app.db.repositories import ReviewTaskRepository
-    from app.db.session import session_scope
-
-    with session_scope() as session:
-        task = ReviewTaskRepository(session).get(review_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail="review not found")
-    return JSONResponse(content={
-        "review_id": task.review_id,
-        "status": task.status.value,
-        "repository": task.repository_full_name,
-        "pr_number": task.pr_number,
-        "head_sha": task.head_sha[:12],
-        "created_at": task.created_at.isoformat() if task.created_at else None,
-        "completed_at": task.completed_at.isoformat() if task.completed_at else None,
-        "error": task.error,
-    })
-
-
-@router.get("/reviews")
-async def list_reviews(limit: int = 20) -> JSONResponse:
-    from app.db.repositories import ReviewTaskRepository
-    from app.db.session import session_scope
-
-    with session_scope() as session:
-        tasks = ReviewTaskRepository(session).list_recent(limit=limit)
-    return JSONResponse(content={
-        "reviews": [
-            {
-                "review_id": t.review_id,
-                "status": t.status.value,
-                "repository": t.repository_full_name,
-                "pr_number": t.pr_number,
-                "head_sha": t.head_sha[:12],
-            }
-            for t in tasks
-        ]
-    })

@@ -18,7 +18,7 @@ An **AI-powered PR review agent** with sandbox execution. It automatically reads
 ## Architecture
 
 ```
-GitHub Webhook → Webhook Receiver → Orchestrator
+GitHub Webhook → POST /api/v1/webhooks/github → Orchestrator
                                       ├─ Planner (review plan)
                                       ├─ Security Reviewer (security review)
                                       ├─ Bug Hunter (defect review)
@@ -130,7 +130,20 @@ Recommended least-privilege permissions:
 | Metadata | Read | Basic repo metadata |
 | Issues | Read & write | Publish PR comments |
 
-Set the Webhook URL to `https://your-host/webhook/github`, Content-Type to `application/json`, and put the secret in `GITHUB_WEBHOOK_SECRET`.
+Set the Webhook URL to `https://your-host/api/v1/webhooks/github`, Content-Type to `application/json`, and put the secret in `GITHUB_WEBHOOK_SECRET`.
+
+## REST API
+
+The full REST API contract (paths, request/response schemas, auth, status codes) lives in [`docs/openapi.yaml`](docs/openapi.yaml) (OpenAPI 3.0); once the service is running you can also browse the interactive docs at `/docs`.
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/health` | none | Health check for load balancers/orchestrators |
+| POST | `/api/v1/webhooks/github` | HMAC signature (`X-Hub-Signature-256`) | Receives GitHub webhooks and creates review tasks |
+| GET | `/api/v1/reviews` | `Authorization: Bearer <API_KEY>` | Lists recent review tasks (paginated) |
+| GET | `/api/v1/reviews/{review_id}` | `Authorization: Bearer <API_KEY>` | Fetches a single review task's detail |
+
+`/api/v1/reviews*` requires `API_KEY` to be set in `.env`. If it isn't, the endpoints fail closed (`503`) instead of silently running unauthenticated.
 
 ## Sandbox Security
 
@@ -162,10 +175,11 @@ PRReviewAgent/
 │   ├── tools/               # tool gateway + GitHub/Sandbox/Analyzer/Memory tools
 │   ├── blackboard/          # shared state across sub-agents
 │   ├── llm/                 # LLM client + prompts
-│   ├── webhook/             # GitHub webhook receiver
+│   ├── api/                 # REST API: /health, /api/v1/webhooks, /api/v1/reviews
 │   └── logging_setup.py     # structured logging (redacted)
 ├── config/                  # YAML config
 ├── docker/sandbox/          # sandbox image Dockerfile
+├── docs/openapi.yaml        # REST API contract (OpenAPI 3.0)
 ├── tests/                   # test suite
 └── pyproject.toml
 ```
@@ -176,7 +190,7 @@ PRReviewAgent/
 pytest tests/ -v
 ```
 
-Test coverage: data models, state machine, analyzer, aggregator, config, GitHub tool, LLM client, Memory tool, webhook receiver.
+Test coverage: data models, state machine, analyzer, aggregator, config, GitHub tool, LLM client, Memory tool, REST API (health/webhooks/reviews).
 
 ## Degradation Strategy
 

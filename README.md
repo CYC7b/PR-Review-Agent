@@ -18,7 +18,7 @@
 ## 架构
 
 ```
-GitHub Webhook → Webhook Receiver → Orchestrator
+GitHub Webhook → POST /api/v1/webhooks/github → Orchestrator
                                       ├─ Planner（审查计划）
                                       ├─ Security Reviewer（安全审查）
                                       ├─ Bug Hunter（缺陷审查）
@@ -130,7 +130,20 @@ pr-review-agent status --review-id repo-123-pr-42-sha-abc123def456
 | Metadata | Read | 基础 repo metadata |
 | Issues | Read & write | 发布 PR comment |
 
-设置 Webhook URL 为 `https://your-host/webhook/github`，Content-Type 为 `application/json`，Secret 填入 `GITHUB_WEBHOOK_SECRET`。
+设置 Webhook URL 为 `https://your-host/api/v1/webhooks/github`，Content-Type 为 `application/json`，Secret 填入 `GITHUB_WEBHOOK_SECRET`。
+
+## REST API
+
+完整的 REST API contract（路径、请求/响应 schema、鉴权方式、状态码）见 [`docs/openapi.yaml`](docs/openapi.yaml)（OpenAPI 3.0），也可在服务启动后访问 `/docs` 查看交互式文档。
+
+| Method | Path | 鉴权 | 说明 |
+|---|---|---|---|
+| GET | `/health` | 无 | 健康检查，供负载均衡器/编排系统探活 |
+| POST | `/api/v1/webhooks/github` | HMAC 签名（`X-Hub-Signature-256`） | 接收 GitHub webhook，创建审查任务 |
+| GET | `/api/v1/reviews` | `Authorization: Bearer <API_KEY>` | 分页列出最近的审查任务 |
+| GET | `/api/v1/reviews/{review_id}` | `Authorization: Bearer <API_KEY>` | 查询单个审查任务详情 |
+
+`/api/v1/reviews*` 需要在 `.env` 中配置 `API_KEY`；未配置时按 fail-closed 策略拒绝请求（`503`），而非放行不设防的管理接口。
 
 ## 沙箱安全
 
@@ -162,10 +175,11 @@ PRReviewAgent/
 │   ├── tools/               # 工具网关 + GitHub/Sandbox/Analyzer/Memory 工具
 │   ├── blackboard/          # 子 Agent 共享状态
 │   ├── llm/                 # LLM 客户端 + 提示词
-│   ├── webhook/             # GitHub Webhook 接收器
+│   ├── api/                 # REST API：/health、/api/v1/webhooks、/api/v1/reviews
 │   └── logging_setup.py     # 结构化日志（脱敏）
 ├── config/                  # YAML 配置
 ├── docker/sandbox/          # 沙箱镜像 Dockerfile
+├── docs/openapi.yaml        # REST API contract（OpenAPI 3.0）
 ├── tests/                   # 测试套件
 └── pyproject.toml
 ```
@@ -176,7 +190,7 @@ PRReviewAgent/
 pytest tests/ -v
 ```
 
-测试覆盖：数据模型、状态机、分析器、聚合器、配置、GitHub 工具、LLM 客户端、Memory 工具、Webhook 接收器。
+测试覆盖：数据模型、状态机、分析器、聚合器、配置、GitHub 工具、LLM 客户端、Memory 工具、REST API（health/webhooks/reviews）。
 
 ## 降级策略
 
