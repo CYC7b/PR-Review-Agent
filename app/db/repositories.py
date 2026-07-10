@@ -24,6 +24,7 @@ from app.models import (
     ReviewState,
     ReviewTask,
     ReviewTaskConfig,
+    TestRunReport,
 )
 
 # --------------------------- ReviewTask ---------------------------
@@ -46,9 +47,16 @@ class ReviewTaskRepository:
         orm.started_at = task.started_at
         orm.completed_at = task.completed_at
         orm.error = task.error
+        orm.summary = task.test_report.model_dump_json() if task.test_report else None
         return orm
 
     def _to_pydantic(self, orm: ReviewTaskORM) -> ReviewTask:
+        test_report = None
+        if orm.summary:
+            try:
+                test_report = TestRunReport.model_validate_json(orm.summary)
+            except (ValueError, TypeError):
+                pass
         return ReviewTask(
             review_id=orm.review_id,
             repository_id=orm.repository_id,
@@ -64,6 +72,7 @@ class ReviewTaskRepository:
             completed_at=orm.completed_at,
             config=ReviewTaskConfig(**orm.config) if orm.config else ReviewTaskConfig(),
             error=orm.error,
+            test_report=test_report,
         )
 
     def save(self, task: ReviewTask) -> ReviewTask:

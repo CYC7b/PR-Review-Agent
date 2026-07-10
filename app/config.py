@@ -67,6 +67,17 @@ class PatchConfig(BaseModel):
     publish_only_if_validated: bool = True
 
 
+class TestingConfig(BaseModel):
+    """Bounded test-engineer behaviour for one PR review."""
+
+    enabled: bool = True
+    budget_seconds: int = 900
+    max_generated_scenarios: int = 6
+    max_test_repair_attempts: int = 2
+    compare_base_on_failure: bool = True
+    allow_local_integration: bool = True
+
+
 class MemoryConfig(BaseModel):
     enable_repo_memory: bool = False
     enable_org_memory: bool = False
@@ -96,6 +107,7 @@ class AppConfig(BaseModel):
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     patch: PatchConfig = Field(default_factory=PatchConfig)
+    testing: TestingConfig = Field(default_factory=TestingConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     github: GitHubConfig = Field(default_factory=GitHubConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)

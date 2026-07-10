@@ -27,12 +27,26 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 from typing import Any
 
 from app.config import get_config, get_settings
 from app.logging_setup import get_logger
 
 logger = get_logger(__name__)
+
+_TEMP_TEST_ROOT = ".pr-review-agent-tests"
+
+
+def _safe_relative_path(path: str, *, temp_only: bool = False) -> str:
+    """Reject paths that could escape the sandbox workspace."""
+    candidate = PurePosixPath(path)
+    if not path or candidate.is_absolute() or ".." in candidate.parts:
+        raise ValueError(f"非法 sandbox 相对路径: {path!r}")
+    normalized = str(candidate)
+    if temp_only and not (normalized == _TEMP_TEST_ROOT or normalized.startswith(_TEMP_TEST_ROOT + "/")):
+        raise ValueError("临时测试只能写入 .pr-review-agent-tests/")
+    return normalized
 
 
 @dataclass
@@ -87,6 +101,14 @@ class SandboxManager:
     def apply_patch(self, sandbox_id: str, patch_content: str) -> dict[str, Any]: ...
 
     def get_diff(self, sandbox_id: str) -> str: ...
+
+    def list_files(self, sandbox_id: str, max_files: int = 5000) -> list[str]: ...
+
+    def read_files(self, sandbox_id: str, paths: list[str], max_bytes_per_file: int = 32768) -> dict[str, str]: ...
+
+    def write_temp_files(self, sandbox_id: str, files: dict[str, str]) -> dict[str, Any]: ...
+
+    def reset_temp_files(self, sandbox_id: str) -> dict[str, Any]: ...
 
     def destroy(self, sandbox_id: str) -> dict[str, Any]: ...
 
@@ -348,6 +370,57 @@ class DockerSandboxManager(SandboxManager):
         r = self.exec(sandbox_id, "git diff")
         return r.stdout
 
+    def list_files(self, sandbox_id: str, max_files: int = 5000) -> list[str]:
+        # File names are returned line-by-line solely for repository discovery.  The
+        # PR archive is untrusted, so do not interpolate paths into shell commands.
+        r = self.exec(sandbox_id, f"find . -type f -print | sed 's#^./##' | head -n {max_files}", timeout=30)
+        if r.exit_code != 0:
+            raise RuntimeError(r.stderr or "无法列出 sandbox 文件")
+        return [line for line in r.stdout.splitlines() if line and "\x00" not in line]
+
+    def read_files(self, sandbox_id: str, paths: list[str], max_bytes_per_file: int = 32768) -> dict[str, str]:
+        inst = self._get(sandbox_id)
+        selected = [_safe_relative_path(path) for path in paths]
+        out: dict[str, str] = {}
+        for path in selected:
+            # Docker's archive API avoids passing untrusted file names to the shell.
+            try:
+                stream, _ = inst.container.get_archive(f"{inst.workspace}/{path}")
+                raw = b"".join(stream)
+                with tarfile.open(fileobj=io.BytesIO(raw), mode="r:*") as tf:
+                    member = next((m for m in tf.getmembers() if m.isfile()), None)
+                    if member and member.size <= max_bytes_per_file:
+                        data = tf.extractfile(member)
+                        if data:
+                            out[path] = data.read(max_bytes_per_file).decode("utf-8", "replace")
+            except Exception:  # noqa: BLE001
+                continue
+        return out
+
+    def write_temp_files(self, sandbox_id: str, files: dict[str, str]) -> dict[str, Any]:
+        inst = self._get(sandbox_id)
+        if len(files) > 12:
+            raise ValueError("临时测试文件数超过上限")
+        tar_buf = io.BytesIO()
+        with tarfile.open(fileobj=tar_buf, mode="w") as tf:
+            for path, content in files.items():
+                safe_path = _safe_relative_path(path, temp_only=True)
+                data = content.encode("utf-8")
+                if len(data) > 65536:
+                    raise ValueError(f"临时测试文件过大: {safe_path}")
+                info = tarfile.TarInfo(name=safe_path)
+                info.size = len(data)
+                tf.addfile(info, io.BytesIO(data))
+        tar_buf.seek(0)
+        inst.container.put_archive(inst.workspace, tar_buf.getvalue())
+        return {"written": sorted(files)}
+
+    def reset_temp_files(self, sandbox_id: str) -> dict[str, Any]:
+        # Only remove the dedicated test artefact directory; production source is
+        # restored separately by PatchGenerator when it applies a candidate patch.
+        r = self.exec(sandbox_id, f"rm -rf -- {_TEMP_TEST_ROOT}", timeout=30)
+        return {"reset": r.exit_code == 0, "error": r.stderr if r.exit_code else None}
+
     def destroy(self, sandbox_id: str) -> dict[str, Any]:
         inst = self._instances.pop(sandbox_id, None)
         if inst is None:
@@ -470,6 +543,49 @@ class LocalSandboxManager(SandboxManager):
 
     def get_diff(self, sandbox_id: str) -> str:
         return self.exec(sandbox_id, "git diff").stdout
+
+    def list_files(self, sandbox_id: str, max_files: int = 5000) -> list[str]:
+        inst = self._get(sandbox_id)
+        paths: list[str] = []
+        for root, _dirs, files in os.walk(inst.local_dir or ""):
+            for name in files:
+                paths.append(os.path.relpath(os.path.join(root, name), inst.local_dir or ""))
+                if len(paths) >= max_files:
+                    return sorted(paths)
+        return sorted(paths)
+
+    def read_files(self, sandbox_id: str, paths: list[str], max_bytes_per_file: int = 32768) -> dict[str, str]:
+        inst = self._get(sandbox_id)
+        out: dict[str, str] = {}
+        for path in paths:
+            safe_path = _safe_relative_path(path)
+            full_path = os.path.join(inst.local_dir or "", safe_path)
+            if not os.path.isfile(full_path) or os.path.getsize(full_path) > max_bytes_per_file:
+                continue
+            with open(full_path, "r", encoding="utf-8", errors="replace") as fh:
+                out[safe_path] = fh.read(max_bytes_per_file)
+        return out
+
+    def write_temp_files(self, sandbox_id: str, files: dict[str, str]) -> dict[str, Any]:
+        inst = self._get(sandbox_id)
+        if len(files) > 12:
+            raise ValueError("临时测试文件数超过上限")
+        for path, content in files.items():
+            safe_path = _safe_relative_path(path, temp_only=True)
+            data = content.encode("utf-8")
+            if len(data) > 65536:
+                raise ValueError(f"临时测试文件过大: {safe_path}")
+            full_path = os.path.join(inst.local_dir or "", safe_path)
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            with open(full_path, "w", encoding="utf-8") as fh:
+                fh.write(content)
+        return {"written": sorted(files)}
+
+    def reset_temp_files(self, sandbox_id: str) -> dict[str, Any]:
+        inst = self._get(sandbox_id)
+        temp_dir = os.path.join(inst.local_dir or "", _TEMP_TEST_ROOT)
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return {"reset": True}
 
     def destroy(self, sandbox_id: str) -> dict[str, Any]:
         inst = self._instances.pop(sandbox_id, None)

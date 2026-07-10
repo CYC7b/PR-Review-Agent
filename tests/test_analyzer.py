@@ -51,6 +51,18 @@ class TestTestCommandDetection:
         cmds = analyzer.detect_test_commands(["makefile", "main.c"])
         assert any(c["cmd"] == "make test" for c in cmds)
 
+    def test_discovers_package_scripts_from_full_repository_context(self):
+        analyzer = AnalyzerTool()
+        cmds = analyzer.discover_test_commands(
+            ["src/service.ts", "package.json", "pnpm-lock.yaml"],
+            {"package.json": '{"scripts":{"test":"vitest","lint":"eslint .","build":"tsc"}}'},
+        )
+        assert [c["cmd"] for c in cmds] == ["pnpm run test", "pnpm run lint", "pnpm run build"]
+
+    def test_dependency_commands_prefer_lockfile(self):
+        analyzer = AnalyzerTool()
+        assert analyzer.detect_dependency_commands(["package.json", "package-lock.json"]) == ["npm ci"]
+
 
 class TestPRClassification:
     def test_docs_only(self, sample_changed_files):

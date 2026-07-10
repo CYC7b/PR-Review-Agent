@@ -58,6 +58,10 @@ def register_tools(gateway: ToolGateway | None = None) -> ToolGateway:
     gateway.register("sandbox.exec", sandbox.exec)
     gateway.register("sandbox.apply_patch", sandbox.apply_patch)
     gateway.register("sandbox.get_diff", sandbox.get_diff)
+    gateway.register("sandbox.list_files", sandbox.list_files)
+    gateway.register("sandbox.read_files", sandbox.read_files)
+    gateway.register("sandbox.write_temp_files", sandbox.write_temp_files)
+    gateway.register("sandbox.reset_temp_files", sandbox.reset_temp_files)
     gateway.register("sandbox.destroy", sandbox.destroy)
     gateway.register("sandbox.destroy_all_for_review", sandbox.destroy_all_for_review)
 

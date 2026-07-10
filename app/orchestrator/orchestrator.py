@@ -210,7 +210,7 @@ class Orchestrator:
         test_results: dict[str, Any] | None = None
         if sandbox_id:
             task = self._transition(task, ReviewState.DYNAMIC_TESTING)
-            test_results = self._dynamic_testing(task, context, plan, sandbox_id)
+            test_results = self._dynamic_testing(task, context, plan, sandbox_id, static_issues)
         else:
             logger.info("orchestrator.skip_dynamic_no_sandbox", review_id=review_id)
 
@@ -300,9 +300,10 @@ class Orchestrator:
         )
         return plan
 
-    def _prepare_sandbox(self, task: ReviewTask, context: dict[str, Any]) -> str | None:
+    def _prepare_sandbox(self, task: ReviewTask, context: dict[str, Any], ref: str | None = None) -> str | None:
         """创建并准备沙箱工作区。"""
         cfg = get_config().sandbox
+        ref = ref or task.head_sha
         try:
             sandbox_id = self.gateway.call(
                 "sandbox.create", review_id=task.review_id, caller="Orchestrator",
@@ -316,7 +317,7 @@ class Orchestrator:
             gh = get_github_client()
             import httpx
 
-            archive_url = f"https://api.github.com/repos/{task.repository_full_name}/tarball/{task.head_sha}"
+            archive_url = f"https://api.github.com/repos/{task.repository_full_name}/tarball/{ref}"
             token = gh._get_installation_token(task.repository_full_name)  # noqa: SLF001
             resp = httpx.get(archive_url, headers={"Authorization": f"token {token}",
                                                     "Accept": "application/vnd.github+json"},
@@ -324,19 +325,10 @@ class Orchestrator:
             archive = resp.content if resp.status_code == 200 else None
 
             self.gateway.call("sandbox.prepare_workspace", review_id=task.review_id,
-                              caller="Orchestrator", head_sha=task.head_sha,
+                              caller="Orchestrator", head_sha=ref,
                               params={"sandbox_id": sandbox_id, "repo": task.repository_full_name,
-                                      "base_sha": task.base_sha, "head_sha": task.head_sha,
+                                      "base_sha": task.base_sha, "head_sha": ref,
                                       "code_archive": archive})
-
-            # 安装依赖（阶段一网络）
-            repo_files = context["repo_files"]
-            install_cmds = self._detect_install_commands(repo_files)
-            if install_cmds:
-                self.gateway.call("sandbox.install_dependencies", review_id=task.review_id,
-                                  caller="Orchestrator", head_sha=task.head_sha,
-                                  params={"sandbox_id": sandbox_id, "commands": install_cmds,
-                                          "network_policy": "dependency"})
             return sandbox_id
         except Exception as exc:  # noqa: BLE001
             logger.error("orchestrator.sandbox_prepare_failed", error=str(exc))
@@ -442,22 +434,38 @@ class Orchestrator:
         return findings
 
     def _dynamic_testing(self, task: ReviewTask, context: dict[str, Any],
-                         plan: ReviewPlan, sandbox_id: str) -> dict[str, Any]:
-        """运行测试套件、lint、SAST。"""
-        # 检测测试命令
-        from app.tools.analyzer_tool import get_analyzer
-
-        analyzer = get_analyzer()
-        detected = analyzer.detect_test_commands(context["repo_files"])
-        commands = [d["cmd"] for d in detected if d["cmd"] != "__CI_CONFIG__"]
-
+                         plan: ReviewPlan, sandbox_id: str, static_issues: list[Issue]) -> dict[str, Any]:
+        """Run the bounded test-engineer loop and compare failures against base."""
         executor = TestExecutor(
             review_id=task.review_id, head_sha=task.head_sha, sandbox_id=sandbox_id,
             repository_full_name=task.repository_full_name, base_sha=task.base_sha,
             gateway=self.gateway,
         )
         self._register_agent(task.review_id, executor)
-        result = executor.run(context["changed_files"], context["repo_files"], commands)
+        result = executor.run(context["changed_files"], static_issues=static_issues)
+
+        # A failing head command is evidence, not a PR regression, until the same
+        # command is tried on base in a fresh, equivalently prepared sandbox.
+        cfg = get_config().testing
+        if cfg.compare_base_on_failure and result.get("failed_commands"):
+            base_sandbox_id = self._prepare_sandbox(task, context, ref=task.base_sha)
+            if base_sandbox_id:
+                base_executor = TestExecutor(
+                    review_id=task.review_id, head_sha=task.base_sha, sandbox_id=base_sandbox_id,
+                    repository_full_name=task.repository_full_name, base_sha=task.base_sha,
+                    gateway=self.gateway,
+                )
+                self._register_agent(task.review_id, base_executor)
+                base_results = base_executor.compare_failures(
+                    result["failed_commands"], result.get("temporary_files", {})
+                )
+                executor.reconcile_baseline(result, base_results)
+            else:
+                result["report"].limitations.append("无法创建 base SHA sandbox，未完成回归归因")
+        try:
+            executor.tool("sandbox.reset_temp_files", sandbox_id=sandbox_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("orchestrator.reset_temp_tests_failed", error=str(exc))
 
         # 持久化测试失败 issues
         with session_scope() as session:
@@ -486,7 +494,10 @@ class Orchestrator:
             file_contents=context["file_contents"], gateway=self.gateway,
         )
         self._register_agent(task.review_id, gen)
-        test_cmds = test_results.get("commands", []) if test_results else []
+        report = test_results.get("report") if test_results else None
+        # Generated tests are deliberately ephemeral and have been removed after
+        # attribution; patch validation only reruns durable repository commands.
+        test_cmds = [r.command for r in report.commands if r.phase == "existing"] if report else []
         patches = gen.run(candidates, test_cmds)
         with session_scope() as session:
             patch_repo = PatchRepository(session)
@@ -537,6 +548,8 @@ class Orchestrator:
         with session_scope() as session:
             repo = ReviewTaskRepository(session)
             task = repo.get(task.review_id) or task
+            if test_results and test_results.get("report"):
+                task.test_report = test_results["report"]
             if task.status not in {ReviewState.COMPLETED, ReviewState.SKIPPED,
                                    ReviewState.SUPERSEDED, ReviewState.CANCELLED,
                                    ReviewState.FAILED, ReviewState.TIMEOUT}:

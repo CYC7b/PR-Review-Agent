@@ -41,6 +41,14 @@ patch:
   allow_public_api_changes: false
   publish_only_if_validated: true
 
+testing:
+  enabled: true
+  budget_seconds: 900
+  max_generated_scenarios: 6
+  max_test_repair_attempts: 2
+  compare_base_on_failure: true
+  allow_local_integration: true
+
 memory:
   enable_repo_memory: false
   enable_org_memory: false

@@ -137,13 +137,13 @@ class ReviewPublisher(BaseAgent):
                 self.logger.error("publisher.summary_failed", error=str(exc))
 
         # 5. 发布 check run
-        conclusion = self._determine_conclusion(issues, patches)
+        conclusion = self._determine_conclusion(issues, patches, test_results)
         try:
             self.tool("github.create_check_run",
                       repo=self.repository_full_name,
                       head_sha=self.head_sha,
                       conclusion=conclusion,
-                      summary=self._check_summary(issues, patches))
+                      summary=self._check_summary(issues, patches, test_results))
         except Exception as exc:  # noqa: BLE001
             self.logger.warning("publisher.check_run_failed", error=str(exc))
 
@@ -254,6 +254,14 @@ class ReviewPublisher(BaseAgent):
 
         # 验证结果
         lines.extend(["", "### Validation"])
+        report = test_results.get("report") if test_results else None
+        if report:
+            report_data = report.model_dump(mode="json") if hasattr(report, "model_dump") else report
+            lines.append(f"- Overall: `{report_data.get('status', 'unknown')}`")
+            for limitation in report_data.get("limitations", []):
+                lines.append(f"- Limitation: {limitation}")
+            for regression in report_data.get("confirmed_regressions", []):
+                lines.append(f"- Confirmed regression: `{regression}`")
         if test_results and test_results.get("results"):
             for r in test_results["results"]:
                 status = "passed" if r.get("exit_code") == 0 else "failed"
@@ -275,18 +283,27 @@ class ReviewPublisher(BaseAgent):
         return "\n".join(lines)
 
     @staticmethod
-    def _determine_conclusion(issues: list[Issue], patches: list[Patch]) -> str:
+    def _determine_conclusion(issues: list[Issue], patches: list[Patch],
+                              test_results: dict[str, Any] | None = None) -> str:
         """决定 check run 结论。"""
         blocking = [i for i in issues if i.severity in (Severity.CRITICAL, Severity.HIGH)
-                    and i.publication.status != PublicationStatus.SUPPRESSED]
+                    and i.publication.status != PublicationStatus.SUPPRESSED
+                    and (i.type.value != "test_failure" or i.introduced_by_pr)]
         if blocking:
             return "failure"
+        report = test_results.get("report") if test_results else None
+        report_status = report.status.value if hasattr(report, "status") else (report or {}).get("status") if report else ""
+        if report_status in {"failed", "incomplete", "timeout", "flaky"}:
+            return "neutral"
         if any(i.severity == Severity.MEDIUM for i in issues):
             return "neutral"
         return "success"
 
     @staticmethod
-    def _check_summary(issues: list[Issue], patches: list[Patch]) -> str:
+    def _check_summary(issues: list[Issue], patches: list[Patch],
+                       test_results: dict[str, Any] | None = None) -> str:
         total = len(issues)
         verified = sum(1 for p in patches if p.validation.status == VerificationStatus.PASSED)
-        return f"Reviewed {total} finding(s); {verified} verified suggestion(s)."
+        report = test_results.get("report") if test_results else None
+        status = report.status.value if hasattr(report, "status") else (report or {}).get("status", "not-run")
+        return f"Reviewed {total} finding(s); tests={status}; {verified} verified suggestion(s)."

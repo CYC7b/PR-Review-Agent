@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pydantic import BaseModel, Field
 
 from app.models.common import ReviewState
+from app.models.test_report import TestRunReport
 
 
 def utcnow() -> datetime:
@@ -36,6 +37,9 @@ class ReviewTask(BaseModel):
     completed_at: datetime | None = None
     config: ReviewTaskConfig = Field(default_factory=ReviewTaskConfig)
     error: str | None = None
+    # Stored in the pre-existing review summary column to remain compatible with
+    # deployed databases that have not yet received an Alembic migration.
+    test_report: TestRunReport | None = None
 
     # 任务键（幂等）：repository_id + pr_number + head_sha
     @property

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -124,6 +125,78 @@ class AnalyzerTool:
             commands.append({"cmd": "__CI_CONFIG__", "kind": "test", "source": "ci-config"})
 
         return commands
+
+    def discover_test_commands(
+        self, repo_files: list[str], file_contents: dict[str, str] | None = None
+    ) -> list[dict[str, Any]]:
+        """Return executable, repo-backed commands without trusting arbitrary CI text."""
+        files = {path.lower(): path for path in repo_files}
+        contents = file_contents or {}
+        commands: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        def add(command: str, kind: str, source: str) -> None:
+            if command not in seen:
+                seen.add(command)
+                commands.append({"cmd": command, "kind": kind, "source": source})
+
+        package_path = files.get("package.json")
+        if package_path:
+            package_manager = "pnpm" if "pnpm-lock.yaml" in files else "yarn" if "yarn.lock" in files else "npm"
+            scripts: dict[str, Any] = {}
+            try:
+                scripts = json.loads(contents.get(package_path, "{}")).get("scripts", {}) or {}
+            except (ValueError, TypeError):
+                pass
+            for name, kind in (("test", "test"), ("lint", "lint"), ("typecheck", "typecheck"), ("build", "build")):
+                if name in scripts:
+                    add(f"{package_manager} run {name}", kind, "package.json")
+            if "test" not in scripts and any(re.search(r"(^|/)(test|tests)/.*\.(?:[cm]?[jt]sx?)$", p, re.I) for p in repo_files):
+                add("node --test", "test", "node test files")
+
+        is_python = any(path in files for path in ("pyproject.toml", "setup.py", "pytest.ini", "tox.ini"))
+        python_tests = any(re.search(r"(^|/)(test|tests)/.*\.py$|(^|/)test_.*\.py$", p, re.I) for p in repo_files)
+        if is_python or python_tests:
+            add("python -m pytest -q", "test", "python project")
+            pyproject = contents.get(files.get("pyproject.toml", ""), "")
+            if any(path in files for path in ("ruff.toml", ".ruff.toml")) or "[tool.ruff]" in pyproject:
+                add("ruff check .", "lint", "ruff config")
+            if "[tool.mypy]" in pyproject or "mypy.ini" in files:
+                add("mypy .", "typecheck", "mypy config")
+
+        if "go.mod" in files:
+            add("go test ./...", "test", "go.mod")
+            add("go vet ./...", "lint", "go.mod")
+            if ".golangci.yml" in files or ".golangci.yaml" in files:
+                add("golangci-lint run", "lint", "golangci config")
+
+        make_path = files.get("makefile")
+        make_text = contents.get(make_path, "") if make_path else ""
+        for target, kind in (("test", "test"), ("lint", "lint"), ("check", "typecheck")):
+            if re.search(rf"^{target}\s*:", make_text, re.MULTILINE):
+                add(f"make {target}", kind, "Makefile")
+        return commands
+
+    def detect_dependency_commands(
+        self, repo_files: list[str], file_contents: dict[str, str] | None = None
+    ) -> list[str]:
+        """Choose lockfile-backed installs; never mask an install failure."""
+        files = {path.lower(): path for path in repo_files}
+        if "pnpm-lock.yaml" in files:
+            return ["corepack enable && pnpm install --frozen-lockfile"]
+        if "yarn.lock" in files:
+            return ["corepack enable && yarn install --frozen-lockfile"]
+        if "package-lock.json" in files:
+            return ["npm ci"]
+        if "package.json" in files:
+            return ["npm install"]
+        if "requirements.txt" in files:
+            return ["pip install -r requirements.txt"]
+        if "pyproject.toml" in files or "setup.py" in files:
+            return ["pip install -e ."]
+        if "go.mod" in files:
+            return ["go mod download"]
+        return []
 
     def classify_pr(self, changed_files: list[dict[str, Any]]) -> list[str]:
         """判断 PR 变更类型（SPEC 5.1 第 6 步）。"""

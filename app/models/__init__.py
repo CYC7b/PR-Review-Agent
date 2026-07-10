@@ -27,6 +27,7 @@ from app.models.issue import (
 from app.models.patch import Patch, PatchValidation
 from app.models.plan import PlannedFile, PlannedTask, ReviewPlan
 from app.models.review import ReviewTask, ReviewTaskConfig, WebhookEvent
+from app.models.test_report import TestCommandResult, TestRunReport, TestRunStatus, TestScenario
 
 __all__ = [
     # common
@@ -45,6 +46,10 @@ __all__ = [
     "ReviewTask",
     "ReviewTaskConfig",
     "WebhookEvent",
+    "TestCommandResult",
+    "TestRunReport",
+    "TestRunStatus",
+    "TestScenario",
     # plan
     "ReviewPlan",
     "PlannedFile",

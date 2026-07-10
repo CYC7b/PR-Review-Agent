@@ -89,17 +89,33 @@ class TestTestExecutorAttribution:
         assert issue.introduced_by_pr is False
         assert issue.confidence < 0.5
 
-    def test_changed_file_failure_attributed_to_pr(self):
-        """H5：失败引用了变更文件 → 归因 PR，较高置信度。"""
+    def test_changed_file_failure_waits_for_baseline_attribution(self):
+        """单次 head 失败不能在没有 base 对比时归因到 PR。"""
         ex = self._executor()
         result = {"exit_code": 1, "stdout": "FAILED src/app.py::test_x", "stderr": ""}
         issue = ex._failure_to_issue("pytest -q", result, [{"path": "src/app.py"}])
         assert issue is not None
-        assert issue.introduced_by_pr is True
-        assert issue.confidence >= 0.7
+        assert issue.introduced_by_pr is False
+        assert issue.confidence < 0.5
 
     def test_dependency_failure_not_reported_as_code_issue(self):
         ex = self._executor()
         result = {"exit_code": 1, "stdout": "ModuleNotFoundError: no module named 'foo'", "stderr": ""}
         issue = ex._failure_to_issue("pytest -q", result, [{"path": "src/app.py"}])
         assert issue is None
+
+    def test_zero_commands_is_incomplete_not_passed(self):
+        from app.agents.test_executor import TestExecutor
+
+        class Gateway:
+            def call(self, _name, **kwargs):
+                if _name == "sandbox.list_files":
+                    return ["src/service.py"]
+                if _name == "sandbox.read_files":
+                    return {}
+                raise AssertionError(_name)
+
+        ex = TestExecutor(review_id="r1", head_sha="abc", sandbox_id="s1", gateway=Gateway())
+        result = ex.run([{"path": "src/service.py"}])
+        assert result["status"] == "incomplete"
+        assert result["commands"] == []
