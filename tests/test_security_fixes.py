@@ -73,6 +73,96 @@ class TestSandboxHardening:
         assert result.get("skipped") is True
         assert result["all_success"] is False
 
+    def test_dependency_network_must_be_internal(self):
+        from app.tools.sandbox_tool import DockerSandboxManager, SandboxInstance
+
+        class Network:
+            attrs = {"Internal": False}
+
+            def reload(self):
+                pass
+
+        class Networks:
+            def get(self, _name):
+                return Network()
+
+        class Client:
+            networks = Networks()
+
+        mgr = DockerSandboxManager.__new__(DockerSandboxManager)
+        mgr._client = Client()
+        inst = SandboxInstance("s", "r", "img", "dependency", container=object())
+        with pytest.raises(RuntimeError, match="internal"):
+            mgr._connect_dependency_network(inst)
+
+
+class TestAdversarialReviewBoundaries:
+    def test_sast_passes_untrusted_paths_as_argv(self):
+        from app.orchestrator.orchestrator import Orchestrator
+
+        calls = []
+
+        class Gateway:
+            def register(self, *_args, **_kwargs):
+                pass
+
+            def call(self, name, **kwargs):
+                calls.append((name, kwargs))
+
+                class Result:
+                    stdout = "{}"
+
+                return Result()
+
+        orch = Orchestrator(gateway=Gateway())
+        hostile = "src/a'; touch PWNED; #.py"
+        assert orch._run_sast("s", {"changed_files": [{"path": hostile}]}, "r") == []
+        command = calls[-1][1]["params"]["command"]
+        assert command == ["bandit", "-f", "json", "-q", hostile]
+
+    def test_preprocess_stops_before_listing_oversized_pr(self):
+        from app.models import ReviewTask
+        from app.orchestrator.orchestrator import Orchestrator
+
+        calls = []
+
+        class Gateway:
+            def register(self, *_args, **_kwargs):
+                pass
+
+            def call(self, name, **kwargs):
+                calls.append(name)
+                if name == "github.get_pr":
+                    return {"changed_files": 101, "title": "large", "body": ""}
+                raise AssertionError(f"unexpected expensive call: {name}")
+
+        task = ReviewTask(
+            review_id="r", repository_id=1, repository_full_name="org/repo",
+            pr_number=1, base_sha="base", head_sha="head",
+        )
+        context = Orchestrator(gateway=Gateway())._preprocess(task)
+        assert context["limit_exceeded_reason"].startswith("变更文件数")
+        assert calls == ["github.get_pr"]
+
+    def test_publisher_fails_closed_when_head_cannot_be_fetched(self):
+        from app.agents.review_publisher import HeadShaMismatch, ReviewPublisher
+        from app.models import ReviewTask
+
+        class Gateway:
+            def call(self, *_args, **_kwargs):
+                raise RuntimeError("GitHub unavailable")
+
+        publisher = ReviewPublisher(
+            review_id="r", head_sha="head", repository_full_name="org/repo",
+            pr_number=1, gateway=Gateway(),
+        )
+        task = ReviewTask(
+            review_id="r", repository_id=1, repository_full_name="org/repo",
+            pr_number=1, base_sha="base", head_sha="head",
+        )
+        with pytest.raises(HeadShaMismatch, match="拒绝发布"):
+            publisher.run(task, [], [])
+
 
 class TestTestExecutorAttribution:
     def _executor(self):

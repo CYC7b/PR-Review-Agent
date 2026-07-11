@@ -67,10 +67,13 @@ class ReviewPublisher(BaseAgent):
 
         # 1. 校验 head SHA 仍匹配（SPEC 12.2）
         current_sha = self._fetch_current_head_sha()
-        if cfg.bind_to_head_sha and current_sha and current_sha != self.head_sha:
-            raise HeadShaMismatch(
-                f"head SHA 已变更: {self.head_sha[:8]} → {current_sha[:8]}"
-            )
+        if cfg.bind_to_head_sha:
+            if not current_sha:
+                raise HeadShaMismatch("无法确认 PR 当前 head SHA，拒绝发布审查结果")
+            if current_sha != self.head_sha:
+                raise HeadShaMismatch(
+                    f"head SHA 已变更: {self.head_sha[:8]} → {current_sha[:8]}"
+                )
 
         # 2. 准备 review comments（行级）与 summary
         review_comments: list[dict[str, Any]] = []

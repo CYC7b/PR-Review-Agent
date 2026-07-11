@@ -95,7 +95,7 @@ class SandboxManager:
     def install_dependencies(self, sandbox_id: str, commands: list[str],
                              network_policy: str = "dependency") -> dict[str, Any]: ...
 
-    def exec(self, sandbox_id: str, command: str, timeout: int = 300,
+    def exec(self, sandbox_id: str, command: str | list[str], timeout: int = 300,
              env_policy: dict | None = None) -> ExecResult: ...
 
     def apply_patch(self, sandbox_id: str, patch_content: str) -> dict[str, Any]: ...
@@ -251,7 +251,9 @@ class DockerSandboxManager(SandboxManager):
                     "reason": "未配置 egress_proxy_url，依赖安装在无网络下跳过（fail-closed）",
                 }
             self._connect_dependency_network(inst)
-            no_proxy = "169.254.169.254,metadata.google.internal,localhost,127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+            # 仅允许本机地址绕过代理。私网和 metadata 地址也必须经过代理侧
+            # allowlist，不能给恶意安装脚本留下直连内部服务的通道。
+            no_proxy = "localhost,127.0.0.1"
             proxy_env = {
                 "HTTP_PROXY": cfg.egress_proxy_url, "HTTPS_PROXY": cfg.egress_proxy_url,
                 "http_proxy": cfg.egress_proxy_url, "https_proxy": cfg.egress_proxy_url,
@@ -273,19 +275,34 @@ class DockerSandboxManager(SandboxManager):
     def _connect_dependency_network(self, inst: SandboxInstance) -> None:
         """连接到受限的依赖解析网络（出网仅经 egress 代理，代理侧强制 allowlist）。"""
         try:
-            self._client.networks.get("pr-review-deps")
-        except Exception:  # noqa: BLE001
-            self._client.networks.create("pr-review-deps", driver="bridge")
-        try:
-            inst.container.connect("pr-review-deps")
+            network = self._client.networks.get("pr-review-deps")
         except Exception as exc:  # noqa: BLE001
-            logger.warning("sandbox.connect_network_failed", error=str(exc))
+            raise RuntimeError(
+                "缺少预配置的内部依赖网络 pr-review-deps；拒绝创建可直连公网的 bridge"
+            ) from exc
+        network.reload()
+        if not network.attrs.get("Internal", False):
+            raise RuntimeError(
+                "pr-review-deps 必须是 internal 网络，并由该网络内的 egress proxy 提供唯一出口"
+            )
+        try:
+            network.connect(inst.container)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("无法连接受限依赖网络") from exc
 
     def _disconnect_network(self, inst: SandboxInstance) -> None:
         try:
-            inst.container.disconnect("pr-review-deps")
-        except Exception:  # noqa: BLE001
-            pass
+            network = self._client.networks.get("pr-review-deps")
+            network.disconnect(inst.container, force=True)
+        except Exception as exc:  # noqa: BLE001
+            # 测试阶段必须恢复 network=none；断开失败时销毁容器，不能让后续
+            # 不可信测试代码继续持有依赖网络访问权。
+            logger.error("sandbox.disconnect_network_failed_destroy", error=str(exc))
+            try:
+                inst.container.remove(force=True)
+            finally:
+                self._instances.pop(inst.sandbox_id, None)
+            raise RuntimeError("无法断开依赖网络，sandbox 已销毁") from exc
 
     def _enforce_lifetime(self, inst: SandboxInstance) -> None:
         """强制容器生命周期上限（SPEC 9.2 / H2）：超时则销毁并抛错。"""
@@ -296,7 +313,7 @@ class DockerSandboxManager(SandboxManager):
             self.destroy(inst.sandbox_id)
             raise TimeoutError(f"sandbox {inst.sandbox_id} 超过生命周期上限 {max_life}s")
 
-    def exec(self, sandbox_id: str, command: str, timeout: int = 300,
+    def exec(self, sandbox_id: str, command: str | list[str], timeout: int = 300,
              env_policy: dict | None = None) -> ExecResult:
         inst = self._get(sandbox_id)
         self._enforce_lifetime(inst)
@@ -498,7 +515,7 @@ class LocalSandboxManager(SandboxManager):
                 break
         return {"results": results, "all_success": all(r["exit_code"] == 0 for r in results)}
 
-    def exec(self, sandbox_id: str, command: str, timeout: int = 300,
+    def exec(self, sandbox_id: str, command: str | list[str], timeout: int = 300,
              env_policy: dict | None = None) -> ExecResult:
         inst = self._get(sandbox_id)
         start = time.monotonic()
@@ -517,7 +534,7 @@ class LocalSandboxManager(SandboxManager):
                 env[k] = str(v)
         try:
             proc = subprocess.run(
-                command, shell=True, cwd=inst.local_dir, capture_output=True,
+                command, shell=isinstance(command, str), cwd=inst.local_dir, capture_output=True,
                 text=True, timeout=timeout, env=env,
             )
             return ExecResult(

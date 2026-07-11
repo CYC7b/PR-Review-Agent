@@ -254,12 +254,31 @@ class Orchestrator:
         pr = self.gateway.call("github.get_pr", review_id=task.review_id, caller="Orchestrator",
                                head_sha=task.head_sha,
                                params={"repo": repo, "pr_number": task.pr_number})
+        cfg = get_config().review
+        changed_file_count = int(pr.get("changed_files", 0) or 0)
+        if changed_file_count > cfg.max_changed_files:
+            return {
+                "pr": pr, "changed_files": [], "diff": "", "file_contents": {}, "repo_files": [],
+                "limit_exceeded_reason": (
+                    f"变更文件数 {changed_file_count} 超过上限 {cfg.max_changed_files}"
+                ),
+            }
         changed_files = self.gateway.call("github.get_changed_files", review_id=task.review_id,
                                           caller="Orchestrator", head_sha=task.head_sha,
                                           params={"repo": repo, "pr_number": task.pr_number})
         diff = self.gateway.call("github.get_diff", review_id=task.review_id,
                                  caller="Orchestrator", head_sha=task.head_sha,
                                  params={"repo": repo, "pr_number": task.pr_number})
+
+        diff_lines = len(diff.splitlines())
+        if diff_lines > cfg.max_diff_lines:
+            return {
+                "pr": pr, "changed_files": changed_files, "diff": "", "file_contents": {},
+                "repo_files": [],
+                "limit_exceeded_reason": (
+                    f"Diff 行数 {diff_lines} 超过上限 {cfg.max_diff_lines}"
+                ),
+            }
 
         # 获取变更文件完整内容（head_sha 版本）
         file_contents: dict[str, str] = {}
@@ -286,6 +305,19 @@ class Orchestrator:
         }
 
     def _plan(self, task: ReviewTask, context: dict[str, Any]) -> ReviewPlan:
+        if context.get("limit_exceeded_reason"):
+            return ReviewPlan(
+                review_id=task.review_id,
+                head_sha=task.head_sha,
+                base_sha=task.base_sha,
+                language_profile=[],
+                change_categories=[],
+                changed_files=[],
+                tasks=[],
+                sandbox_required=False,
+                estimated_cost_class="high",
+                skip_reason=context["limit_exceeded_reason"],
+            )
         planner = Planner(
             review_id=task.review_id, head_sha=task.head_sha, base_sha=task.base_sha,
             repository_full_name=task.repository_full_name, pr_number=task.pr_number,
@@ -399,11 +431,11 @@ class Orchestrator:
                     and f.get("status") != "removed"]
         if not py_files:
             return []
-        targets = " ".join(f"'{p}'" for p in py_files)
         try:
             result = self.gateway.call(
                 "sandbox.exec", review_id=review_id, caller="Orchestrator",
-                params={"sandbox_id": sandbox_id, "command": f"bandit -f json -q {targets}",
+                params={"sandbox_id": sandbox_id,
+                        "command": ["bandit", "-f", "json", "-q", *py_files],
                         "timeout": 300},
             )
             stdout = result.stdout if hasattr(result, "stdout") else result.get("stdout", "")
